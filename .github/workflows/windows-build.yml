@@ -20,28 +20,25 @@ jobs:
       - name: Depoyu indir
         uses: actions/checkout@v4
 
-      - name: Siyah ekran duzeltme ZIP dosyasini ac
+      - name: ZIP dosyasini ac ve projeyi bul
         shell: pwsh
         run: |
           $zipFiles = @(
             Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter "*.zip" -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
+              Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } |
+              Sort-Object -Property @{
+                Expression = {
+                  if ($_.Name -eq "SpartaArenaRemastered_BlackScreenFix_20261028.zip") { 0 }
+                  elseif ($_.Name -match "BlackScreenFix") { 1 }
+                  elseif ($_.Name -match "FullUpgrade") { 2 }
+                  else { 3 }
+                }
+              }, FullName
           )
 
           if ($zipFiles.Count -eq 0) {
-            throw "Depoda ZIP bulunamadi. Yuklenen ZIP dosyasini kontrol et."
+            throw "Depoda ZIP bulunamadi."
           }
-
-          $zipFiles = @(
-            $zipFiles | Sort-Object -Property @{
-              Expression = {
-                if ($_.Name -eq "SpartaArenaRemastered_BlackScreenFix_20261028.zip") { 0 }
-                elseif ($_.Name -match "BlackScreenFix") { 1 }
-                elseif ($_.Name -match "FullUpgrade") { 2 }
-                else { 3 }
-              }
-            }, FullName
-          )
 
           $extractRoot = Join-Path $env:RUNNER_TEMP "SpartaArenaV3"
 
@@ -50,7 +47,6 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-
           $project = $null
           $index = 0
 
@@ -78,7 +74,7 @@ jobs:
               }
             }
             catch {
-              Write-Host "ZIP acilamadi: $($_.Exception.Message)"
+              Write-Host "ZIP acma hatasi: $($_.Exception.Message)"
             }
           }
 
@@ -87,7 +83,7 @@ jobs:
           }
 
           $projectDir = $project.Directory.FullName
-          Write-Host "Godot projesi bulundu: $projectDir"
+          Write-Host "Proje bulundu: $projectDir"
           "PROJECT_DIR=$projectDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Godot ve Windows export sablonlarini kur
@@ -98,90 +94,46 @@ jobs:
           include-templates: true
           cache: false
 
-      - name: Godot'u bul ve baslat
-        shell: pwsh
+      - name: Godot komutunu kontrol et
+        shell: bash
         run: |
-          $godotCommand = Get-Command godot -ErrorAction SilentlyContinue
-          $godotExe = $null
+          echo "Godot komutu aranıyor..."
+          command -v godot
+          godot --headless --version
 
-          if ($godotCommand -and $godotCommand.Source) {
-            $godotExe = $godotCommand.Source
-          }
-
-          if (-not $godotExe) {
-            foreach ($candidate in @($env:GODOT4, $env:GODOT)) {
-              if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-                $godotExe = $candidate
-                break
-              }
-            }
-          }
-
-          if (-not $godotExe) {
-            $installDir = Join-Path $env:USERPROFILE "godot"
-
-            if (Test-Path $installDir) {
-              $godotExe = Get-ChildItem -Path $installDir -Filter "Godot_v*.exe" -Recurse -File -ErrorAction SilentlyContinue |
-                Select-Object -First 1 -ExpandProperty FullName
-            }
-          }
-
-          if (-not $godotExe) {
-            Write-Host "PATH: $env:PATH"
-            Write-Host "GODOT: $env:GODOT"
-            Write-Host "GODOT4: $env:GODOT4"
-            throw "Godot calistirilabilir dosyasi bulunamadi."
-          }
-
-          Write-Host "Godot: $godotExe"
-          $versionOutput = & $godotExe --headless --version 2>&1
-          $exitCode = $LASTEXITCODE
-
-          if ($versionOutput) {
-            $versionOutput | ForEach-Object { Write-Host "$_" }
-          }
-
-          if ($exitCode -ne 0) {
-            throw "Godot baslatilamadi. Cikis kodu: $exitCode"
-          }
-
-          "GODOT_EXE=$godotExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Proje kaynaklarini ice aktar
-        shell: pwsh
+      - name: Projeyi ice aktar
+        shell: bash
         run: |
-          & "$env:GODOT_EXE" --headless --editor --path "$env:PROJECT_DIR" --import --quit
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Godot kaynaklarini ice aktarma basarisiz oldu."
-          }
+          PROJECT_DIR_UNIX="$(cygpath -u "$PROJECT_DIR")"
+          godot --headless --editor --path "$PROJECT_DIR_UNIX" --import --quit
 
       - name: Oyun acilis testi
-        shell: pwsh
+        shell: bash
         run: |
-          & "$env:GODOT_EXE" --headless --path "$env:PROJECT_DIR" --quit-after 3
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Oyun acilis testinde hata olustu."
-          }
+          PROJECT_DIR_UNIX="$(cygpath -u "$PROJECT_DIR")"
+          godot --headless --path "$PROJECT_DIR_UNIX" --quit-after 3
 
       - name: Windows EXE olustur
-        shell: pwsh
+        shell: bash
         run: |
-          $outputDir = Join-Path $env:GITHUB_WORKSPACE "build"
-          New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+          PROJECT_DIR_UNIX="$(cygpath -u "$PROJECT_DIR")"
+          WORKSPACE_UNIX="$(cygpath -u "$GITHUB_WORKSPACE")"
 
-          $outputFile = Join-Path $outputDir "SpartaArenaRemastered.exe"
+          mkdir -p "$WORKSPACE_UNIX/build"
 
-          & "$env:GODOT_EXE" --headless --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$outputFile"
+          godot --headless \
+            --path "$PROJECT_DIR_UNIX" \
+            --export-release "Windows Desktop" \
+            "$WORKSPACE_UNIX/build/SpartaArenaRemastered.exe"
 
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outputFile)) {
-            throw "Windows EXE olusturulamadi."
-          }
+          if [ ! -f "$WORKSPACE_UNIX/build/SpartaArenaRemastered.exe" ]; then
+            echo "EXE dosyasi olusturulamadi."
+            exit 1
+          fi
 
-          Write-Host "EXE olusturuldu: $outputFile"
+          echo "EXE basariyla olusturuldu."
 
-      - name: EXE dosyasini indirilebilir yap
+      - name: EXE dosyasini indirmeye hazirla
         uses: actions/upload-artifact@v4
         with:
           name: Sparta-Arena-Remastered-V3-Windows
