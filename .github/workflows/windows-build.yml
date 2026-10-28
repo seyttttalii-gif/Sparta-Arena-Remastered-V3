@@ -1,0 +1,189 @@
+
+name: Sparta Arena Remastered V3 - Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Sparta Arena Remastered
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Siyah ekran duzeltme ZIP dosyasini ac
+        shell: pwsh
+        run: |
+          $zipFiles = @(
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter "*.zip" -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' }
+          )
+
+          if ($zipFiles.Count -eq 0) {
+            throw "Depoda ZIP bulunamadi. Yuklenen ZIP dosyasini kontrol et."
+          }
+
+          $zipFiles = @(
+            $zipFiles | Sort-Object -Property @{
+              Expression = {
+                if ($_.Name -eq "SpartaArenaRemastered_BlackScreenFix_20261028.zip") { 0 }
+                elseif ($_.Name -match "BlackScreenFix") { 1 }
+                elseif ($_.Name -match "FullUpgrade") { 2 }
+                else { 3 }
+              }
+            }, FullName
+          )
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "SpartaArenaV3"
+
+          if (Test-Path $extractRoot) {
+            Remove-Item -Path $extractRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+
+          $project = $null
+          $index = 0
+
+          foreach ($zip in $zipFiles) {
+            $index++
+            $target = Join-Path $extractRoot "archive_$index"
+
+            Write-Host "ZIP aciliyor: $($zip.Name)"
+            New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+            try {
+              Expand-Archive -LiteralPath $zip.FullName -DestinationPath $target -Force
+
+              $found = Get-ChildItem -Path $target -Filter "project.godot" -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {
+                  (Test-Path (Join-Path $_.Directory.FullName "scripts/game_root.gd")) -and
+                  (Test-Path (Join-Path $_.Directory.FullName "export_presets.cfg")) -and
+                  (Test-Path (Join-Path $_.Directory.FullName "scenes/main.tscn"))
+                } |
+                Select-Object -First 1
+
+              if ($found) {
+                $project = $found
+                break
+              }
+            }
+            catch {
+              Write-Host "ZIP acilamadi: $($_.Exception.Message)"
+            }
+          }
+
+          if (-not $project) {
+            throw "ZIP icinde gerekli Godot proje dosyalari bulunamadi."
+          }
+
+          $projectDir = $project.Directory.FullName
+          Write-Host "Godot projesi bulundu: $projectDir"
+          "PROJECT_DIR=$projectDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Godot ve Windows export sablonlarini kur
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: true
+          cache: false
+
+      - name: Godot'u bul ve baslat
+        shell: pwsh
+        run: |
+          $godotCommand = Get-Command godot -ErrorAction SilentlyContinue
+          $godotExe = $null
+
+          if ($godotCommand -and $godotCommand.Source) {
+            $godotExe = $godotCommand.Source
+          }
+
+          if (-not $godotExe) {
+            foreach ($candidate in @($env:GODOT4, $env:GODOT)) {
+              if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                $godotExe = $candidate
+                break
+              }
+            }
+          }
+
+          if (-not $godotExe) {
+            $installDir = Join-Path $env:USERPROFILE "godot"
+
+            if (Test-Path $installDir) {
+              $godotExe = Get-ChildItem -Path $installDir -Filter "Godot_v*.exe" -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty FullName
+            }
+          }
+
+          if (-not $godotExe) {
+            Write-Host "PATH: $env:PATH"
+            Write-Host "GODOT: $env:GODOT"
+            Write-Host "GODOT4: $env:GODOT4"
+            throw "Godot calistirilabilir dosyasi bulunamadi."
+          }
+
+          Write-Host "Godot: $godotExe"
+          $versionOutput = & $godotExe --headless --version 2>&1
+          $exitCode = $LASTEXITCODE
+
+          if ($versionOutput) {
+            $versionOutput | ForEach-Object { Write-Host "$_" }
+          }
+
+          if ($exitCode -ne 0) {
+            throw "Godot baslatilamadi. Cikis kodu: $exitCode"
+          }
+
+          "GODOT_EXE=$godotExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Proje kaynaklarini ice aktar
+        shell: pwsh
+        run: |
+          & "$env:GODOT_EXE" --headless --editor --path "$env:PROJECT_DIR" --import --quit
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Godot kaynaklarini ice aktarma basarisiz oldu."
+          }
+
+      - name: Oyun acilis testi
+        shell: pwsh
+        run: |
+          & "$env:GODOT_EXE" --headless --path "$env:PROJECT_DIR" --quit-after 3
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Oyun acilis testinde hata olustu."
+          }
+
+      - name: Windows EXE olustur
+        shell: pwsh
+        run: |
+          $outputDir = Join-Path $env:GITHUB_WORKSPACE "build"
+          New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+
+          $outputFile = Join-Path $outputDir "SpartaArenaRemastered.exe"
+
+          & "$env:GODOT_EXE" --headless --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$outputFile"
+
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $outputFile)) {
+            throw "Windows EXE olusturulamadi."
+          }
+
+          Write-Host "EXE olusturuldu: $outputFile"
+
+      - name: EXE dosyasini indirilebilir yap
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sparta-Arena-Remastered-V3-Windows
+          path: build/SpartaArenaRemastered.exe
+          if-no-files-found: error
